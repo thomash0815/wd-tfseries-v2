@@ -7,5 +7,5 @@ output "service_plan_id" {
 }
 
 output "default_hostname" {
-  value = azurerm_linux_web_app.this.default_hostname
+  value = "https://${azurerm_linux_web_app.this.default_hostname}"
 }
