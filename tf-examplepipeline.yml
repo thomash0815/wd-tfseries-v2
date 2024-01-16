@@ -1,0 +1,143 @@
+parameters:
+  - name: tag_value_environment
+    displayName: "environment"
+    type: string
+    default: "dev"
+
+variables:  
+  serviceconnectionName: 'SvcConAzure'
+  backendAzureRmSubscriptionId: 'xxxx'  
+  backendAzureRmResourceGroupName: 'rg-tfstate'  
+  backendAzureRmStorageAccountName: 'xxxx'  
+  backendAzureRmContainerName: 'tfstate'  
+  keyName: 'test.tfstate'  
+  tfinstall: true
+
+stages:
+  - stage: 'dev'
+    jobs:
+      - job: tf_init_plan
+        displayName: Terraform prepare
+        steps:
+        - task: TerraformInstaller@1
+          enabled: ${{variables.tfinstall}}
+          displayName: Terraform Install
+          inputs:
+            terraformVersion: "latest"
+        - script: echo $(Build.SourcesDirectory)
+
+        - task: TerraformCLI@1
+          displayName: terraform init
+          condition: succeeded ()
+          inputs:
+            command: "init"
+            workingDirectory: "$(Build.SourcesDirectory)/infrastructure"
+            backendType: "azurerm"
+            backendServiceArm: ${{ variables.serviceconnectionName }}
+            backendAzureRmSubscriptionId: ${{variables.backendAzureRmSubscriptionId}}
+            backendAzureRmStorageAccountName: ${{variables.backendAzureRmStorageAccountName}}
+            backendAzureRmContainerName: ${{variables.backendAzureRmContainerName}}
+            backendAzureRmKey: ${{variables.keyName}}
+
+        - task: TerraformCLI@1
+          displayName: terraform plan
+          inputs:
+            command: "plan"
+            workingDirectory: "$(Build.SourcesDirectory)/infrastructure"
+            environmentServiceName: ${{ variables.serviceconnectionName }}
+            providerAzureRmSubscriptionId: ${{variables.backendAzureRmSubscriptionId}}
+            allowTelemetryCollection: false
+            commandOptions: >-
+              -var tag_value_environment=${{parameters.tag_value_environment}}
+              --var-file=$(Build.SourcesDirectory)/infrastructure/variables.tfvars
+              -out=$(Build.SourcesDirectory)/infrastructure/tfdeploy.tfplan
+            publishPlanResults: "plan_results"       
+
+        - task: TerraformCLI@0
+          displayName: tf plan show
+          inputs:
+            command: 'show'
+            inputTargetPlanOrStateFilePath: 'tfdeploy.tfplan'
+            workingDirectory: "$(Build.SourcesDirectory)/infrastructure"
+            
+        - bash: |
+            if [ "$TERRAFORM_PLAN_HAS_CHANGES" = true ] && [ "$TERRAFORM_PLAN_HAS_DESTROY_CHANGES" = true ] ; 
+            then
+              echo "##vso[task.setvariable variable=SHOW_DESTROY;isOutput=true]true"
+              echo "##vso[task.logissue type=warning]Destroy detected, manual approval required"
+            else echo "##vso[task.setvariable variable=SHOW_DESTROY;isOutput=true]false"
+              fi
+          name: "setvar"
+          displayName: "set destroy variable"
+
+        - publish: "$(Build.SourcesDirectory)/infrastructure/tfdeploy.tfplan"
+          artifact: '$(System.StageAttempt)_plan'
+          displayName: publish artifact for tf plan tab
+
+      - job: validationGate
+        displayName: Manual validation
+        pool: server
+        dependsOn: tf_init_plan
+        condition: eq(dependencies.tf_init_plan.outputs['setvar.SHOW_DESTROY'], 'true')
+        steps:
+        - task: ManualValidation@0
+          timeoutInMinutes: 10
+          inputs:
+            notifyUsers: 'TerraformDemo Team'
+            instructions: 'Check if destroying resources is intended'
+            onTimeout: 'reject'
+
+      - job: tf_apply
+        displayName: Terraform apply
+        dependsOn:
+         - tf_init_plan
+         - validationGate
+        condition: or(succeeded('validationGate'), eq(dependencies.tf_init_plan.outputs['setvar.SHOW_DESTROY'], 'false'))
+        steps:
+        # pub, download & copy if different jobs are used
+
+        - download: current
+          artifact: '$(System.StageAttempt)_plan'
+          displayName: 'Download tf plan'
+
+        - task: CopyFiles@2
+          inputs:
+            SourceFolder: "$(Pipeline.Workspace)/$(System.StageAttempt)_plan/"
+            Contents: "**"
+            TargetFolder: "$(Build.SourcesDirectory)/infrastructure"
+          displayName: 'copy artifact'
+
+        - task: TerraformInstaller@1
+          enabled: ${{variables.tfinstall}}
+          displayName: Terraform Install
+          inputs:
+            terraformVersion: "latest"
+
+        - task: TerraformCLI@1
+          displayName: terraform init
+          condition: succeeded ()
+          inputs:
+            command: "init"
+            workingDirectory: "$(Build.SourcesDirectory)/infrastructure"
+            backendType: "azurerm"
+            backendServiceArm: ${{ variables.serviceconnectionName }}
+            backendAzureRmSubscriptionId: ${{variables.backendAzureRmSubscriptionId}}
+            backendAzureRmResourceGroupName: ${{variables.backendAzureRmResourceGroupName}}
+            backendAzureRmStorageAccountName: ${{variables.backendAzureRmStorageAccountName}}
+            backendAzureRmContainerName: ${{variables.backendAzureRmContainerName}}
+            backendAzureRmKey: ${{variables.keyName}} 
+
+        - task: TerraformCLI@1
+          displayName: terraform apply
+          inputs:
+            command: "apply"
+            workingDirectory: "$(Build.SourcesDirectory)/infrastructure"
+            environmentServiceName: ${{ variables.serviceconnectionName }}
+            providerAzureRmSubscriptionId: ${{variables.backendAzureRmSubscriptionId}}
+            allowTelemetryCollection: false
+            commandOptions:  $(Build.SourcesDirectory)/infrastructure/tfdeploy.tfplan
+
+          
+
+
+              
